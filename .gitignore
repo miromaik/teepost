@@ -1,0 +1,20 @@
+# Build artifacts
+/teepost
+dist/
+target/
+node_modules/
+/frontend/node_modules/
+/frontend/dist/
+
+# Runtime SQLite database and media
+/data/
+*.db
+*.db-wal
+*.db-shm
+
+# Environment & OS files
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db

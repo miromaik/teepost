@@ -1,0 +1,19 @@
+services:
+  teepost:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: teepost
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PORT:-8787}:8787"
+    environment:
+      PORT: 8787
+      DB_PATH: /app/data/crossposter.db
+      MEDIA_DIR: /app/data/media
+      TZ: ${TZ:-UTC}
+    volumes:
+      - teepost_data:/app/data
+
+volumes:
+  teepost_data:
