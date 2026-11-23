@@ -129,7 +129,7 @@ func (p *DiscordPublisher) Publish(ctx context.Context, payload PostPayload) (Pu
 			if rErr == nil {
 				followReq.Header.Set("Content-Type", "application/json")
 				if _, cErr := doJSONOrError(p.client, followReq, "Discord first comment"); cErr != nil {
-					return PublishResult{}, cErr
+					return PublishResult{ExternalID: parsed.ID}, cErr
 				}
 			}
 		}

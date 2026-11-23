@@ -132,7 +132,13 @@ export const AccountsSettingsView: React.FC<AccountsSettingsViewProps> = ({
     setTestingEditor(true);
     setEditorTestResult(null);
     try {
-      const res = await api.testUnsavedCredentials(editor.platform, editor.credentials);
+      const missingSecret = PLATFORMS[editor.platform].fields.some(
+        (field) => field.secret && !(editor.credentials[field.key] ?? '').trim()
+      );
+      const res =
+        editor.mode === 'edit' && editor.accountId && missingSecret
+          ? await api.testSavedAccount(editor.accountId)
+          : await api.testUnsavedCredentials(editor.platform, editor.credentials);
       setEditorTestResult(res);
     } catch (err) {
       setEditorTestResult({
@@ -479,7 +485,11 @@ export const AccountsSettingsView: React.FC<AccountsSettingsViewProps> = ({
                     id={`cred-${field.key}`}
                     type={field.secret ? 'password' : 'text'}
                     className="text-input"
-                    placeholder={field.placeholder}
+                    placeholder={
+                      editor.mode === 'edit' && field.secret
+                        ? 'Leave blank to keep current'
+                        : field.placeholder
+                    }
                     value={editor.credentials[field.key] ?? ''}
                     onChange={(e) =>
                       setEditor({
@@ -487,7 +497,7 @@ export const AccountsSettingsView: React.FC<AccountsSettingsViewProps> = ({
                         credentials: { ...editor.credentials, [field.key]: e.target.value },
                       })
                     }
-                    required={field.required}
+                    required={field.required && (editor.mode === 'create' || !field.secret)}
                   />
                 </div>
               ))}

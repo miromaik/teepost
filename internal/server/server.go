@@ -111,8 +111,17 @@ func New(cfg Config, store *db.Store, mediaMgr *media.Manager, distFS fs.FS) *Se
 	// Embedded React SPA fallback
 	mux.Handle("/", s.spaHandler())
 
-	s.handler = s.auth.middleware(mux)
+	s.handler = securityHeaders(s.auth.middleware(mux))
 	return s
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Handler returns the root http.Handler.

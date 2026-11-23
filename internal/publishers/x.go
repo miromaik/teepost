@@ -135,7 +135,7 @@ func (p *XPublisher) Publish(ctx context.Context, payload PostPayload) (PublishR
 			if rErr == nil {
 				replyReq.Header.Set("Content-Type", "application/json")
 				if _, fErr := doJSONOrError(client, replyReq, "X first comment"); fErr != nil {
-					return PublishResult{}, fErr
+					return PublishResult{ExternalID: parsed.Data.ID, ExternalURL: externalURL}, fErr
 				}
 			}
 		}

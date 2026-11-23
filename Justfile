@@ -12,8 +12,8 @@ build:
 
 # Run all Go tests with race detector and typecheck frontend
 test:
-    cd frontend && npx tsc --noEmit
-    go test -v -race ./tests/... ./...
+    cd frontend && npm run build
+    go test -v -race ./...
 
 # Format Go source files
 fmt:

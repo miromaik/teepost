@@ -111,7 +111,7 @@ func (p *MastodonPublisher) Publish(ctx context.Context, payload PostPayload) (P
 				replyReq.Header.Set("Content-Type", "application/json")
 				replyReq.Header.Set("Authorization", "Bearer "+p.creds.AccessToken)
 				if _, fErr := doJSONOrError(p.client, replyReq, "Mastodon first comment"); fErr != nil {
-					return PublishResult{}, fErr
+					return PublishResult{ExternalID: parsed.ID, ExternalURL: parsed.URL}, fErr
 				}
 			}
 		}

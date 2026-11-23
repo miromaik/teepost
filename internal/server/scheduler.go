@@ -14,6 +14,13 @@ func (s *Server) StartScheduler(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
+	// Posts left in publishing by a crash have no lease; fail them with a diagnostic result.
+	if recovered, err := s.store.RecoverStalePublishingPosts(time.Now().UTC().Add(-2 * time.Minute)); err != nil {
+		slog.Error("recover stale publishing posts", "error", err)
+	} else if recovered > 0 {
+		slog.Warn("recovered stale publishing posts", "count", recovered)
+	}
+
 	// Run once shortly after startup in case posts became due while offline.
 	s.processDueScheduledPosts(ctx)
 
@@ -64,6 +71,9 @@ func (s *Server) publishClaimedPost(ctx context.Context, post db.Post) {
 		seen[accID] = true
 		acc, err := s.store.GetAccount(accID)
 		if err != nil {
+			continue
+		}
+		if !acc.Enabled {
 			continue
 		}
 		targetAccounts = append(targetAccounts, acc)

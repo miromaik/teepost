@@ -2,9 +2,11 @@ package publishers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -73,6 +75,12 @@ func formatHTTPError(prefix string, status int, body string) error {
 func doJSONOrError(client *http.Client, req *http.Request, prefix string) ([]byte, error) {
 	resp, err := client.Do(req)
 	if err != nil {
+		// net/http wraps transport errors in *url.Error, which embeds the full URL.
+		// Bot tokens and webhook tokens live in those URLs, so keep only the cause.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return nil, fmt.Errorf("%s: %w", prefix, err)
 	}
 	defer resp.Body.Close()

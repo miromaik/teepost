@@ -201,7 +201,7 @@ func (p *BlueskyPublisher) Publish(ctx context.Context, payload PostPayload) (Pu
 				replyReq.Header.Set("Content-Type", "application/json")
 				replyReq.Header.Set("Authorization", "Bearer "+session.AccessJwt)
 				if _, fErr := doJSONOrError(p.client, replyReq, "Bluesky first comment"); fErr != nil {
-					return PublishResult{}, fErr
+					return PublishResult{ExternalID: parsed.URI, ExternalURL: externalURL}, fErr
 				}
 			}
 		}

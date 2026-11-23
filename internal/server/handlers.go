@@ -25,6 +25,7 @@ func generateID() string {
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
 }
@@ -58,13 +59,83 @@ func validateAccountInput(in accountInput) error {
 	return nil
 }
 
+var secretCredentialKeys = map[string][]string{
+	"x":        {"apiKey", "apiSecret", "accessToken", "accessTokenSecret"},
+	"bluesky":  {"appPassword"},
+	"telegram": {"botToken"},
+	"discord":  {"webhookUrl"},
+	"mastodon": {"accessToken"},
+}
+
+func secretKeysForPlatform(platform string) []string {
+	return secretCredentialKeys[strings.ToLower(strings.TrimSpace(platform))]
+}
+
+func sanitizeAccount(acc db.Account) db.Account {
+	creds := map[string]string{}
+	if acc.CredentialsJSON != "" {
+		_ = json.Unmarshal([]byte(acc.CredentialsJSON), &creds)
+	}
+	for _, key := range secretKeysForPlatform(acc.Platform) {
+		delete(creds, key)
+	}
+	raw, err := json.Marshal(creds)
+	if err != nil {
+		raw = []byte("{}")
+	}
+	acc.Credentials = raw
+	acc.CredentialsJSON = ""
+	return acc
+}
+
+func sanitizeAccounts(accounts []db.Account) []db.Account {
+	sanitized := make([]db.Account, len(accounts))
+	for i, acc := range accounts {
+		sanitized[i] = sanitizeAccount(acc)
+	}
+	return sanitized
+}
+
+func mergeAccountCredentials(platform, existingJSON string, incoming json.RawMessage) (json.RawMessage, error) {
+	merged := map[string]string{}
+	if existingJSON != "" {
+		if err := json.Unmarshal([]byte(existingJSON), &merged); err != nil {
+			return nil, fmt.Errorf("decode existing credentials: %w", err)
+		}
+	}
+
+	incomingMap := map[string]string{}
+	if len(incoming) > 0 {
+		if err := json.Unmarshal(incoming, &incomingMap); err != nil {
+			return nil, fmt.Errorf("decode credentials: %w", err)
+		}
+	}
+
+	secretKeys := make(map[string]bool, len(secretKeysForPlatform(platform)))
+	for _, key := range secretKeysForPlatform(platform) {
+		secretKeys[key] = true
+	}
+	for key, value := range incomingMap {
+		if secretKeys[key] && strings.TrimSpace(value) == "" {
+			continue
+		}
+		merged[key] = value
+	}
+
+	raw, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("encode credentials: %w", err)
+	}
+	return raw, nil
+}
+
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	accounts, err := s.store.ListAccounts()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, accounts)
+	writeJSON(w, http.StatusOK, sanitizeAccounts(accounts))
 }
 
 func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +163,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	writeJSON(w, http.StatusCreated, sanitizeAccount(created))
 }
 
 func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +175,27 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	in.Platform = strings.ToLower(strings.TrimSpace(in.Platform))
 	in.Name = strings.TrimSpace(in.Name)
+
+	existing, err := s.store.GetAccount(id)
+	if errors.Is(err, db.ErrNotFound) {
+		writeJSONError(w, http.StatusNotFound, "account not found")
+		return
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	existingCredentials := existing.CredentialsJSON
+	if existing.Platform != in.Platform {
+		existingCredentials = ""
+	}
+	mergedCredentials, err := mergeAccountCredentials(in.Platform, existingCredentials, in.Credentials)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	in.Credentials = mergedCredentials
 
 	if err := validateAccountInput(in); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -117,15 +209,11 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		Enabled:         in.Enabled,
 		CredentialsJSON: string(in.Credentials),
 	})
-	if errors.Is(err, db.ErrNotFound) {
-		writeJSONError(w, http.StatusNotFound, "account not found")
-		return
-	}
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	writeJSON(w, http.StatusOK, sanitizeAccount(updated))
 }
 
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
@@ -213,6 +301,7 @@ func (s *Server) handleTestUnsavedCredentials(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleUploadMedia(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
 	if err := r.ParseMultipartForm(20 << 20); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "failed to parse multipart upload")
 		return
@@ -244,7 +333,7 @@ func (s *Server) handleServeMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", mimeType)
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
@@ -342,6 +431,8 @@ func publishToAccount(ctx context.Context, postID string, acc db.Account, text s
 	if err != nil {
 		result.Status = "error"
 		result.ErrorMessage = err.Error()
+		result.ExternalID = pubRes.ExternalID
+		result.ExternalURL = pubRes.ExternalURL
 		return result
 	}
 
@@ -349,6 +440,20 @@ func publishToAccount(ctx context.Context, postID string, acc db.Account, text s
 	result.ExternalID = pubRes.ExternalID
 	result.ExternalURL = pubRes.ExternalURL
 	return result
+}
+
+func systemFailureResult(postID, text, message string) db.PostResult {
+	return db.PostResult{
+		ID:           generateID(),
+		PostID:       postID,
+		AccountID:    "system",
+		Platform:     "system",
+		AccountName:  "System",
+		TextSent:     text,
+		Status:       "error",
+		ErrorMessage: message,
+		PublishedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
 }
 
 func (s *Server) executePublish(ctx context.Context, postID string, targetAccounts []db.Account, req publishRequest, attachments []publishers.MediaAttachment) (db.Post, error) {
@@ -460,16 +565,46 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("account %q not found", accID))
 			return
 		}
+		if !acc.Enabled {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("account %q is disabled", acc.Name))
+			return
+		}
 		targetAccounts = append(targetAccounts, acc)
 	}
 
 	postID := req.PostID
 	if postID == "" {
 		postID = generateID()
+	} else {
+		existing, getErr := s.store.GetPost(postID)
+		switch {
+		case errors.Is(getErr, db.ErrNotFound):
+			// caller-provided id for a brand new post; continue
+		case getErr != nil:
+			writeJSONError(w, http.StatusInternalServerError, getErr.Error())
+			return
+		default:
+			if existing.Status == db.PostStatusSent || existing.Status == db.PostStatusPublishing {
+				writeJSONError(w, http.StatusConflict, "post is already being published or was sent")
+				return
+			}
+			claimed, claimErr := s.store.ClaimPostForPublishing(postID)
+			if claimErr != nil {
+				writeJSONError(w, http.StatusInternalServerError, claimErr.Error())
+				return
+			}
+			if !claimed {
+				writeJSONError(w, http.StatusConflict, "post is already being published or was sent")
+				return
+			}
+		}
 	}
 
 	savedPost, err := s.executePublish(r.Context(), postID, targetAccounts, req, attachments)
 	if err != nil {
+		_, _ = s.store.FinalizePublishedPost(postID, db.PostStatusFailed, []db.PostResult{
+			systemFailureResult(postID, req.MasterText, err.Error()),
+		})
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -580,6 +715,13 @@ func (s *Server) handlePublishSavedPostNow(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	switch post.Status {
+	case db.PostStatusDraft, db.PostStatusIdea, db.PostStatusScheduled:
+	default:
+		writeJSONError(w, http.StatusConflict, "post is already being published or was sent")
+		return
+	}
+
 	accountIDs := post.TargetAccountIDs
 	if len(accountIDs) == 0 {
 		accounts, err := s.store.ListAccounts()
@@ -597,14 +739,25 @@ func (s *Server) handlePublishSavedPostNow(w http.ResponseWriter, r *http.Reques
 	}
 
 	targetAccounts := make([]db.Account, 0, len(accountIDs))
+	targetIDs := make([]string, 0, len(accountIDs))
+	seen := make(map[string]bool, len(accountIDs))
 	for _, accID := range accountIDs {
-		acc, err := s.store.GetAccount(accID)
-		if err == nil {
-			targetAccounts = append(targetAccounts, acc)
+		if seen[accID] {
+			continue
 		}
+		seen[accID] = true
+		acc, err := s.store.GetAccount(accID)
+		if err != nil {
+			continue
+		}
+		if !acc.Enabled {
+			continue
+		}
+		targetAccounts = append(targetAccounts, acc)
+		targetIDs = append(targetIDs, acc.ID)
 	}
 	if len(targetAccounts) == 0 {
-		writeJSONError(w, http.StatusBadRequest, "target channels no longer exist")
+		writeJSONError(w, http.StatusBadRequest, "no enabled target channels available for this post")
 		return
 	}
 
@@ -614,9 +767,19 @@ func (s *Server) handlePublishSavedPostNow(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	claimed, err := s.store.ClaimPostForPublishing(post.ID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !claimed {
+		writeJSONError(w, http.StatusConflict, "post is already being published or was sent")
+		return
+	}
+
 	req := publishRequest{
 		PostID:              post.ID,
-		AccountIDs:          accountIDs,
+		AccountIDs:          targetIDs,
 		MasterText:          post.MasterText,
 		FirstComment:        post.FirstComment,
 		CustomizePerNetwork: post.CustomizePerNetwork,
@@ -626,6 +789,9 @@ func (s *Server) handlePublishSavedPostNow(w http.ResponseWriter, r *http.Reques
 	}
 	updated, err := s.executePublish(r.Context(), post.ID, targetAccounts, req, attachments)
 	if err != nil {
+		_, _ = s.store.FinalizePublishedPost(post.ID, db.PostStatusFailed, []db.PostResult{
+			systemFailureResult(post.ID, post.MasterText, err.Error()),
+		})
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -793,6 +959,20 @@ func (s *Server) handleRetryPostAccount(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if !acc.Enabled {
+		writeJSONError(w, http.StatusBadRequest, "account is disabled")
+		return
+	}
+
+	for _, existing := range post.Results {
+		if existing.AccountID != accountID {
+			continue
+		}
+		if strings.TrimSpace(existing.ExternalID) != "" || strings.TrimSpace(existing.ExternalURL) != "" {
+			writeJSONError(w, http.StatusConflict, "the main post already exists on this platform; retrying would duplicate it")
+			return
+		}
 	}
 
 	attachments, err := s.loadMediaAttachments(post.Media)

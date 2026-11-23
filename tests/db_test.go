@@ -188,3 +188,44 @@ func TestQueuePauseReorderShuffleAndHashtagGroups(t *testing.T) {
 		t.Fatalf("expected seeded hashtag groups, got %d (err=%v)", len(groups), err)
 	}
 }
+
+func TestClaimPostForPublishing(t *testing.T) {
+	store := openTestStore(t)
+
+	if _, err := store.SavePost(db.Post{
+		ID:          "claim-scheduled",
+		Status:      db.PostStatusScheduled,
+		MasterText:  "hello",
+		ScheduledAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("save scheduled post: %v", err)
+	}
+
+	claimed, err := store.ClaimPostForPublishing("claim-scheduled")
+	if err != nil || !claimed {
+		t.Fatalf("first claim should succeed, claimed=%v err=%v", claimed, err)
+	}
+
+	claimed, err = store.ClaimPostForPublishing("claim-scheduled")
+	if err != nil {
+		t.Fatalf("second claim error: %v", err)
+	}
+	if claimed {
+		t.Fatal("second claim must fail because post is already publishing")
+	}
+
+	if _, err := store.SavePost(db.Post{
+		ID:         "claim-sent",
+		Status:     db.PostStatusSent,
+		MasterText: "done",
+	}); err != nil {
+		t.Fatalf("save sent post: %v", err)
+	}
+	claimed, err = store.ClaimPostForPublishing("claim-sent")
+	if err != nil {
+		t.Fatalf("sent claim error: %v", err)
+	}
+	if claimed {
+		t.Fatal("sent post must not be claimable")
+	}
+}

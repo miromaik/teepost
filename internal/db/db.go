@@ -583,6 +583,82 @@ func (s *Store) ClaimDueScheduledPosts(nowUTC time.Time) ([]Post, error) {
 	return due, nil
 }
 
+// ClaimPostForPublishing atomically marks a draft, idea, or scheduled post as publishing.
+func (s *Store) ClaimPostForPublishing(id string) (bool, error) {
+	res, err := s.sqlDB.Exec(`
+		UPDATE posts
+		SET status = ?, updated_at = ?
+		WHERE id = ? AND status IN (?, ?, ?)
+	`, PostStatusPublishing, nowISO(), id, PostStatusDraft, PostStatusIdea, PostStatusScheduled)
+	if err != nil {
+		return false, fmt.Errorf("claim post %s: %w", id, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("claim post %s rows affected: %w", id, err)
+	}
+	return affected > 0, nil
+}
+
+// RecoverStalePublishingPosts marks posts stuck in publishing as failed with a diagnostic result.
+func (s *Store) RecoverStalePublishingPosts(cutoff time.Time) (int, error) {
+	tx, err := s.sqlDB.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin recovery tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(`
+		SELECT id, master_text
+		FROM posts
+		WHERE status = ? AND updated_at < ?
+	`, PostStatusPublishing, cutoff.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("query stale publishing posts: %w", err)
+	}
+
+	type stalePost struct {
+		id         string
+		masterText string
+	}
+	stale := make([]stalePost, 0)
+	for rows.Next() {
+		var p stalePost
+		if err := rows.Scan(&p.id, &p.masterText); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("scan stale publishing post: %w", err)
+		}
+		stale = append(stale, p)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+
+	nowStr := nowISO()
+	for _, p := range stale {
+		if _, err := tx.Exec(`UPDATE posts SET status = ?, updated_at = ? WHERE id = ?`, PostStatusFailed, nowStr, p.id); err != nil {
+			return 0, fmt.Errorf("mark stale post %s failed: %w", p.id, err)
+		}
+		if _, err := tx.Exec(`DELETE FROM post_results WHERE post_id = ?`, p.id); err != nil {
+			return 0, fmt.Errorf("clear stale results for %s: %w", p.id, err)
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO post_results (
+				id, post_id, account_id, platform, account_name, text_sent,
+				status, external_id, external_url, error_message, published_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, newID(), p.id, "system", "system", "System", p.masterText, "error", "", "",
+			"Publishing was interrupted by a restart. Verify the post on each platform before retrying.", nowStr); err != nil {
+			return 0, fmt.Errorf("insert recovery result for %s: %w", p.id, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit recovery tx: %w", err)
+	}
+	return len(stale), nil
+}
+
 // FinalizePublishedPost updates a post's status and replaces its delivery results.
 func (s *Store) FinalizePublishedPost(postID string, status string, results []PostResult) (Post, error) {
 	tx, err := s.sqlDB.Begin()

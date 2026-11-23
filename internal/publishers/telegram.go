@@ -85,7 +85,7 @@ func (p *TelegramPublisher) Publish(ctx context.Context, payload PostPayload) (P
 	if fc := strings.TrimSpace(payload.FirstComment); fc != "" {
 		replyID, _ := strconv.ParseInt(res.ExternalID, 10, 64)
 		if _, fcErr := p.sendMessage(ctx, fc, replyID); fcErr != nil {
-			return PublishResult{}, fcErr
+			return res, fcErr
 		}
 	}
 	return res, nil
